@@ -1,0 +1,69 @@
+name: 'dockerhub'
+
+on:
+  push:
+    branches:
+    - master
+
+jobs:
+  build-bagua:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cuda-version: "cuda10.2"
+            cudnn-version: "cudnn7"
+            pytorch-version: "pytorch-1.9.0"
+          - cuda-version: "cuda11.1"
+            cudnn-version: "cudnn8"
+            pytorch-version: "pytorch-1.9.0"
+          - cuda-version: "cuda11.3"
+            cudnn-version: "cudnn8"
+            pytorch-version: "pytorch-1.10.0"
+    name: 'Build'
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Build:checkout"
+        uses: actions/checkout@v2
+        with:
+          submodules: recursive
+      - name: Login to DockerHub
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: build and push bagua
+        uses: docker/build-push-action@v2.6.1
+        with:
+          context: .
+          push: true
+          tags: baguasys/bagua:master-${{ matrix.pytorch-version }}-${{ matrix.cuda-version }}-${{ matrix.cudnn-version }}
+          file: docker/Dockerfile.${{ matrix.pytorch-version }}-${{ matrix.cuda-version }}-${{ matrix.cudnn-version }}
+  build-manylinux:
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda-version:
+          - "102"
+          - "111"
+          - "113"
+          - "115"
+    name: 'Build'
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Build:checkout"
+        uses: actions/checkout@v2
+        with:
+          submodules: recursive
+      - name: Login to DockerHub
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: build and push bagua/manylinux
+        uses: docker/build-push-action@v2.6.1
+        with:
+          context: .
+          push: true
+          tags: baguasys/manylinux-cuda:${{ matrix.cuda-version }}
+          file: docker/Dockerfile.manylinux-cuda${{ matrix.cuda-version }}

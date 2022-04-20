@@ -1,0 +1,3 @@
+bagua>=0.8
+torch
+torchvision

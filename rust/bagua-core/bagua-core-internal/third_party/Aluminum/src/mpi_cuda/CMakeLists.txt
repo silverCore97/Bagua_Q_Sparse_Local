@@ -1,0 +1,15 @@
+set_source_path(THIS_DIR_CXX_SOURCES
+  communicator.cpp
+  )
+
+set_source_path(THIS_DIR_CUDA_RMA_CXX_SOURCES
+  rma.cpp
+  )
+
+if (AL_HAS_MPI_CUDA_RMA)
+  list(APPEND THIS_DIR_CXX_SOURCES "${THIS_DIR_CUDA_RMA_CXX_SOURCES}")
+endif ()
+
+# Propagate the files up the tree
+set(CXX_SOURCES ${CXX_SOURCES} ${THIS_DIR_CXX_SOURCES} PARENT_SCOPE)
+set(CUDA_SOURCES ${CUDA_SOURCES} ${THIS_DIR_CUDA_SOURCES} PARENT_SCOPE)
