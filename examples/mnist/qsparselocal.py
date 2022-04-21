@@ -157,8 +157,7 @@ class QSparseLocalAlgorithmImpl(AlgorithmImpl):
                     def set_weights(param, t):
                         # Gradient is subtracted from global and local model
 
-                        self.optimizer.state[param]["global"].add_( -t)
-                        self.optimizer.state[param]["local"]=self.optimizer.state[param]["global"]
+                        self.optimizer.state[param]["qsl_grad"] = t
 
                     registered_tensor = param.bagua_ensure_grad().ensure_bagua_tensor(
                         param._q_sparse_local_name,
@@ -207,12 +206,14 @@ class QSparseLocalAlgorithmImpl(AlgorithmImpl):
     ):
         bucket.clear_ops()
         if self.schedule is None or self.optimizer.step_id in self.schedule:
-            '''  Not entirely sure where to implement Sparsification
-                        def QComp_k(*args):
-                            pass
 
-                        bucket.append_python_op(calculate_momentum, group=self.process_group)
-                        '''
+            def set_weights(*args):
+                for tensor in bucket.tensors:
+                    self.optimizer.state["global"].add_(-tensor.bagua_getter_closure())
+                    self.optimizer.state["local"] = self.optimizer.state["global"]
+            
+            bucket.append_python_op(set_weights, group=self.process_group)
+            
             bucket.append_centralized_synchronous_op(
                 hierarchical=self.hierarchical,
                 average=True,
