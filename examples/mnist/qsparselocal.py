@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from bagua.torch_api.bucket import BaguaBucket
 from bagua.torch_api.tensor import BaguaTensor
-from bagua.torch_api.distributed import BaguaModule
+from bagua.torch_api.data_parallel.bagua_distributed import BaguaDistributedDataParallel
 from bagua.torch_api.algorithms import Algorithm, AlgorithmImpl
 from bagua.torch_api.communication import BaguaProcessGroup
 from torch.optim.optimizer import Optimizer
@@ -138,11 +138,11 @@ class QSparseLocalAlgorithmImpl(AlgorithmImpl):
         self.schedule = self.optimizer.schedule
         
 
-    def need_reset(self):
-        return True
+    #def need_reset(self):
+    #    return True
 
-    def init_tensors(self, bagua_module: BaguaModule):
-        parameters = bagua_module.bagua_build_params()
+    def init_tensors(self, bagua_distributed_data_parallel: BaguaDistributedDataParallel):
+        parameters =  bagua_distributed_data_parallel.bagua_build_params()
 
         for idx, (name, param) in enumerate(parameters.__reversed__()):
             param._q_sparse_local_name = name
@@ -162,7 +162,7 @@ class QSparseLocalAlgorithmImpl(AlgorithmImpl):
 
                     registered_tensor = param.bagua_ensure_grad().ensure_bagua_tensor(
                         param._q_sparse_local_name,
-                        bagua_module.bagua_module_name,
+                         bagua_distributed_data_parallel.bagua_module_name,
                         getter_closure=lambda param: self.optimizer.state[param]["qsl_grad"],
                         setter_closure=set_weights,
                     )
@@ -202,7 +202,7 @@ class QSparseLocalAlgorithmImpl(AlgorithmImpl):
 
     def init_operations(
             self,
-            bagua_module: BaguaModule,
+             bagua_distributed_data_parallel: BaguaDistributedDataParallel,
             bucket: BaguaBucket,
     ):
         bucket.clear_ops()
@@ -225,7 +225,7 @@ class QSparseLocalAlgorithmImpl(AlgorithmImpl):
 
 
     # Instead of momentum hook, we use a qsl_gradient hook
-    def init_backward_hook(self, bagua_module: BaguaModule):
+    def init_backward_hook(self,  bagua_distributed_data_parallel: BaguaDistributedDataParallel):
 
         def hook_qsl_grad(parameter_name, parameter):
             assert (
