@@ -158,7 +158,7 @@ class QSparseLocalAlgorithmImpl(AlgorithmImpl):
                         # Gradient is subtracted from global and local model
 
                         self.optimizer.state[param]["global"].add_( -t)
-                        #self.optimizer.state[param]["local"]=self.optimizer.state[param]["global"]
+                        self.optimizer.state[param]["local"]=self.optimizer.state[param]["global"]
 
                     registered_tensor = param.bagua_ensure_grad().ensure_bagua_tensor(
                         param._q_sparse_local_name,
