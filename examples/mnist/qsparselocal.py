@@ -107,7 +107,7 @@ class QSparseLocalOptimizer(Optimizer):
                 state["local"].add_(param.grad, alpha=-lr)
 
                 #  If synchronization in this round
-                if self.schedule is None or self.schedule[self.step_id]:
+                if self.schedule is None or self.step_id in self.schedule:
                     # Calculate quantized gradient
                     state["qsl_grad"] = self.qsl(state["memory"] + state["global"] - state["local"])
 
@@ -155,8 +155,10 @@ class QSparseLocalAlgorithmImpl(AlgorithmImpl):
 
                     # register local and global parameter vector
                     def set_weights(param, t):
-                        self.optimizer.state[param]["local"] = t
-                        self.optimizer.state[param]["global"] = t
+                        # Gradient is subtracted from global and local model
+
+                        self.optimizer.state[param]["global"].add_( -t)
+                        #self.optimizer.state[param]["local"]=self.optimizer.state[param]["global"]
 
                     registered_tensor = param.bagua_ensure_grad().ensure_bagua_tensor(
                         param._q_sparse_local_name,
@@ -178,11 +180,20 @@ class QSparseLocalAlgorithmImpl(AlgorithmImpl):
         bagua_buckets = []
         #print("Tensor qsparselocal:\n\n",tensors)
         #print("\n\nTensor shape: ",tensors.shape())
+        #print("Attributes:\n\n", dir(tensors[0][0]))
+        #print("\n\nLength\n\n", len(tensors[0][0]))
+        #print("\n\nLength\n\n", len(tensors[0][1]))
+        #print("\n\nLength\n\n", len(tensors[0][2]))
+        #print("\n\nLength\n\n", len(tensors[0][3]))
+        #print("\n\nDatapointer: ", tensors[0][0].data_ptr)
+        #print("\n\nDatapointer: ", tensors[0][1].data_ptr)
+        #print("\n\nDatapointer: ", tensors[0][2].data_ptr)
+        #print("\n\nDatapointer: ", tensors[0][3].data_ptr)
         for idx, bucket in enumerate(tensors):
             bagua_bucket = BaguaBucket(
                 bucket,
-                #flatten=do_flatten,
-                flatten=True,
+                flatten=do_flatten,
+                #flatten=True,
                 name=str(idx),
                 alignment=self.process_group.get_global_communicator().nranks(),
             )
