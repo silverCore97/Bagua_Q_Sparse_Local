@@ -23,6 +23,7 @@ use_normalization = True
 ## Output: Quantized and sparsified Gradient tensor
 def qsl(eta_grad,
         memory,
+        qsl_grad,   # No output, instead change in function
         topK_flag,
         s,
         # sparsify,
@@ -102,11 +103,8 @@ def qsl(eta_grad,
 
     err = input - q
 
-    #print("\n\n input in qsl","of shape",input.size(),"\n", torch.reshape(input, [-1])[:3])
-    #print("q:",torch.reshape(q, [-1])[:3])
-    #print("err:", torch.reshape(err, [-1])[:3])
-
-    return q, err
+    memory.mul_(0).add_(err)
+    qsl_grad.mul_(0).add_(q)
 
 
 class QSparseLocalOptimizer(Optimizer):
@@ -118,15 +116,14 @@ class QSparseLocalOptimizer(Optimizer):
             schedule: int = 1
     ):
         """
-        Create a dedicated optimizer used for
-        `QSparseLocal <https://tutorials.baguasys.com/algorithms/q-adam>`_ algorithm.
+        Create a dedicated optimizer used for `QSparseLocal`_ algorithm.
 
         Args:
             params (iterable): Iterable of parameters to optimize or dicts defining
                 parameter groups.
             lr: Learning rate.
             k: How many tensor components are kept during sparsification
-            schedule: Description of synchronization schedule
+            schedule: Number of rounds per synchronization round (Gap - 1)
         """
         if not 0.0 <= lr:
             raise ValueError("Invalid learning rate: {}".format(lr))
@@ -135,7 +132,6 @@ class QSparseLocalOptimizer(Optimizer):
 
         defaults = dict(lr=lr, k=k, schedule=schedule)
         super(QSparseLocalOptimizer, self).__init__(params, defaults)
-        # TODO: QSparseLocal optimizer maintain `step_id` in its state
         self.step_id = 0
         self.schedule = schedule
         self.k = k
@@ -149,10 +145,6 @@ class QSparseLocalOptimizer(Optimizer):
                 params_with_grad.append(p)
                 state = self.state[p]
                 if len(state) == 0:
-                    ##### Instead of state["local"] use param.data as local model
-                    # state["local"] = torch.zeros_like(
-                    #     p, memory_format=torch.preserve_format
-                    # )
 
                     state["global"] = torch.zeros_like(
                         p, memory_format=torch.preserve_format
@@ -160,77 +152,41 @@ class QSparseLocalOptimizer(Optimizer):
                     # Set global to initialized value of local weights
                     state["global"].add_(p.data)
 
-                    # print("global init",state["global"].size())
                     state["memory"] = torch.zeros_like(
                         p, memory_format=torch.preserve_format
                     )
-                    # print("comp init", state["error_comp"].size())
+
                     state["qsl_grad"] = torch.zeros_like(
                         p, memory_format=torch.preserve_format
                     )
-                    #print("Hello")
+
                     """
-                    ###local: Local parameter vector
+                    Local parameter vector inside p.data
                     global: Global paramenter vector (same for all workers)
                     error_comp: Term for error compensation for quantization and sparsification of gradient tensor
                     qsl_grad: The quantized and sparsified gradient tensor to be sent to master (to allreduce)
                     """
-                    """  ###Leads to problem with gradient
-                    # Set local weights to 0 in the beginning, format: torch.Size([32, 1, 3, 3])
-                    
-                    # p.data uses normal pytorch initializer by default
-                    p.data = torch.zeros_like(
-                        p, memory_format=torch.preserve_format
-                    )
-                    """
+
 
     def __setstate__(self, state):
         super(QSparseLocalOptimizer, self).__setstate__(state)
 
     def step(self, closure=None):
-        self.step_id += 1
-
-        # Now schedule defines the number of round per synchronization round
-        self.sync = self.step_id % self.schedule == 0
-
-        ############################## LR adjustment
-        #Quarter learning every 100 steps
-        #if self.step_id%300 == 0:
-        #  self.lr /= 2
-        ###############################
 
         for group_id, group in enumerate(self.param_groups):
-
             for param_id, param in enumerate(group["params"]):
                 state = self.state[param]
 
-                #print("Data: ",torch.reshape(param.data,[-1])[:10])
-
-                #Calculate new global and local weights
-                #if self.sync:
-                    #new_var = last_var + hvd.allreduce(var-last_var, var, opt, wipe_memory)
-                    # Nothing happens for the first step
-
-                state["global"].add_(state["qsl_grad"])
-                param.data.add_(-param.data).add_(state["global"])
-
-
-                #LARC
-                #eta=1/math.sqrt(torch.numel(param.grad))        
-                #param.data.add_(param.grad, alpha=-min(self.lr,eta*torch.norm(param.data, p=1)/torch.norm(param.grad, p=1)))
-                
-                param.data.add_(param.grad,alpha=-self.lr) 
-
-
-
-                ##### In allreduce before allreduce operation
-                # Compute compressed gradient and new error compensation term
-                # Horovod: eta local-global
+                #Calculate new global and local weights after synchronzation
                 if self.sync:
-                    state["qsl_grad"], state["memory"] = qsl(param.data - state["global"], state["memory"],
-                                                             topK_flag=top_k_sparsification, s=quantization_levels)
-
-
+                    state["global"].add_(state["qsl_grad"])
+                    param.data.mul_(0).add_(state["global"])
+                    
+        self.step_id += 1
+        # Schedule defines the number of rounds per synchronization round
+        self.sync = self.step_id % self.schedule == 0
+                    
+                
 class QSparseLocalAlgorithmImpl(AlgorithmImpl):
     def __init__(
             self,
@@ -239,9 +195,8 @@ class QSparseLocalAlgorithmImpl(AlgorithmImpl):
             hierarchical: bool = True,
     ):
         """
-        Implementation of the
-        `QSparseLocal Algorithm <https://tutorials.baguasys.com/algorithms/q-adam>`_
-        .
+        Implementation of the `QSparseLocal Algorithm `.
+
         Args:
             process_group: The process group to work on.
             q_sparse_local_optimizer: A QSparseLocalOptimizer initialized with model parameters.
@@ -252,9 +207,12 @@ class QSparseLocalAlgorithmImpl(AlgorithmImpl):
         self.optimizer = q_sparse_local_optimizer
         self.sync = self.optimizer.sync
 
-    # Needed to switch between synchronization aand local rounds
     def need_reset(self):
-        return True
+        if self.optimizer.sync or \
+          self.optimizer.step_id%self.optimizer.schedule == self.optimizer.schedule-1:
+            return True
+        else:
+          return False
 
     def init_tensors(self, bagua_distributed_data_parallel: BaguaDistributedDataParallel):
         parameters = bagua_distributed_data_parallel.bagua_build_params()
@@ -266,11 +224,8 @@ class QSparseLocalAlgorithmImpl(AlgorithmImpl):
         tensor_groups = []
         for group in self.optimizer.param_groups:
             for param in group["params"]:
-                #if self.sync:
-
-                # Second half Step 4
                 def set_weights(param, t):
-                    # Set compressed gradient to mean of all workers compressed gradients
+                    # Set compressed gradient to mean of all workers' compressed gradients
                     self.optimizer.state[param]["qsl_grad"] = t
 
                 registered_tensor = param.bagua_ensure_grad().ensure_bagua_tensor(
@@ -280,9 +235,7 @@ class QSparseLocalAlgorithmImpl(AlgorithmImpl):
                     setter_closure=set_weights,
                 )
                 tensor_groups.append(registered_tensor)
-                #else:
-                    # Nothing happens
-                    #pass
+
 
         tensor_groups.sort(key=lambda x: x._q_sparse_local_idx)
         return tensor_groups
@@ -291,12 +244,10 @@ class QSparseLocalAlgorithmImpl(AlgorithmImpl):
             self, tensors: List[List[BaguaTensor]], do_flatten: bool
     ) -> List[BaguaBucket]:
         bagua_buckets = []
-
         for idx, bucket in enumerate(tensors):
             bagua_bucket = BaguaBucket(
                 bucket,
                 flatten=do_flatten,
-                # flatten=True,
                 name=str(idx),
                 alignment=self.process_group.get_global_communicator().nranks(),
             )
@@ -308,16 +259,31 @@ class QSparseLocalAlgorithmImpl(AlgorithmImpl):
             bagua_distributed_data_parallel: BaguaDistributedDataParallel,
             bucket: BaguaBucket,
     ):
-        bucket.clear_ops()
-        
-        # For synchronization round we utilize allreduce
-        if True:  #self.sync:
+        bucket.clear_ops()      
+        # For synchronization round we utilize allreduce, else no synchronization takes place
+        if self.optimizer.sync:
+            def preprocess(*args):
+              for group_id, group in enumerate(self.optimizer.param_groups):
+                for param_id, param in enumerate(group["params"]):
+                    state = self.optimizer.state[param]
+                    ##### Before allreduce operation
+                    # Compute temporary local parameter vector
+                    # Compute compressed gradient and new error compensation term
+                    param.data.add_(param.grad,alpha=-self.optimizer.lr) 
+                    if self.optimizer.sync:
+                        # No output, new values assigned inside the function
+                        qsl(param.data - state["global"], state["memory"],state["qsl_grad"],
+                                                    topK_flag=top_k_sparsification, s=quantization_levels)
+
+            bucket.append_python_op(lambda *args :preprocess(*args), group=self.process_group)
+
             # Compression is done by Bagua
+
             bucket.append_centralized_synchronous_op(
                 hierarchical=self.hierarchical,
                 average=True,  # Maybe try false and then average it manually to preserve ints
                 scattergather=True,
-                compression="MinMaxUInt8",      #TO DO:  Make qsl_grad suitable for compression
+                compression="MinMaxUInt8",    
                 group=self.process_group,
             )
         else:  # Nothing happens
@@ -339,9 +305,7 @@ class QSparseLocalAlgorithmImpl(AlgorithmImpl):
 class QSparseLocalAlgorithm(Algorithm):
     def __init__(self, q_sparse_local_optimizer: QSparseLocalOptimizer, hierarchical: bool = True):
         """
-        Create an instance of the
-        `QSparseLocal Algorithm <https://tutorials.baguasys.com/algorithms/q-adam>`_
-        .
+        Create an instance of the `QSparseLocal Algorithm' .
 
         Args:
             q_sparse_local_optimizer: A QSparseLocalOptimizer initialized with model parameters.

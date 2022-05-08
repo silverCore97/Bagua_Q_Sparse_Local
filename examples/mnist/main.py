@@ -10,7 +10,7 @@ from torchvision import datasets, transforms
 from torch.optim.lr_scheduler import StepLR
 import logging
 import bagua.torch_api as bagua
-
+import time
 
 class Net(nn.Module):
     def __init__(self):
@@ -89,6 +89,7 @@ def test(model, test_loader):
             100.0 * correct / len(test_loader.dataset),
         )
     )
+    return test_loss,correct
 
 
 def main():
@@ -145,7 +146,7 @@ def main():
     parser.add_argument(
         "--algorithm",
         type=str,
-        default="gradient_allreduce",
+        default="qsparselocal",
         help="qsparselocal, gradient_allreduce, bytegrad, decentralized, low_precision_decentralized, qadam, async",
     )
     parser.add_argument(
@@ -167,7 +168,8 @@ def main():
         help="fuse optimizer or not",
     )
 
-    args = parser.parse_args()
+    #args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
     if args.set_deterministic:
         print("set_deterministic: True")
         np.random.seed(666)
@@ -223,9 +225,6 @@ def main():
     model = Net().cuda()
     optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
 
-    if args.fuse_optimizer:
-        optimizer = bagua.contrib.fuse_optimizer(optimizer)
-
     if args.algorithm == "gradient_allreduce":
         from bagua.torch_api.algorithms import gradient_allreduce
 
@@ -242,34 +241,25 @@ def main():
         from bagua.torch_api.algorithms import bytegrad
 
         algorithm = bytegrad.ByteGradAlgorithm()
-
     elif args.algorithm == "qadam":
         from bagua.torch_api.algorithms import q_adam
 
         optimizer = q_adam.QAdamOptimizer(
-                model.parameters(), lr=0.00001, warmup_steps=100
+            model.parameters(), lr=args.lr, warmup_steps=100
         )
         algorithm = q_adam.QAdamAlgorithm(optimizer)
 
-    elif args.algorithm == "qadam2":
-        import q_adam_2
-
-        optimizer = q_adam_2.QAdamOptimizer(
-            model.parameters(), lr=0.0001, warmup_steps=100
-        )
-        algorithm = q_adam_2.QAdamAlgorithm(optimizer)
-
-######
     elif args.algorithm == "qsparselocal":
-        #from bagua.torch_api.algorithms import qsparselocal
-        #from "/home/kqian/mnt/ds3lab-scratch/kqian/bagua/bagua/torch_api/algorithms" import qsparselocal
         import qsparselocal
+        learning_rate = args.lr
+        #Gap between synchronization rounds
+        gap = 1
 
         optimizer = qsparselocal.QSparseLocalOptimizer(
-            model.parameters(), lr=0.00001
+            model.parameters(), lr=learning_rate, schedule = gap +1
         )
         algorithm = qsparselocal.QSparseLocalAlgorithm(optimizer)
-######    
+
     elif args.algorithm == "async":
         from bagua.torch_api.algorithms import async_model_average
 
@@ -283,11 +273,17 @@ def main():
         [optimizer],
         algorithm,
         do_flatten=not args.fuse_optimizer,
-        #do_flatten=False,
-
     )
 
+    if args.fuse_optimizer:
+        optimizer = bagua.contrib.fuse_optimizer(optimizer)
+
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
+
+    loss_list =[]
+    acc_list = []
+    start = time.time()
+    
     for epoch in range(1, args.epochs + 1):
         if args.algorithm == "async":
             model.bagua_algorithm.resume(model)
@@ -297,11 +293,31 @@ def main():
         if args.algorithm == "async":
             model.bagua_algorithm.abort(model)
 
-        test(model, test_loader)
+        #test(model, test_loader)
+
+        new_loss,new_acc =test(model, test_loader)
+        loss_list.append(new_loss)
+        acc_list.append(new_acc/100.0)
+        
         scheduler.step()
 
     if args.save_model:
         torch.save(model.state_dict(), "mnist_cnn.pt")
+
+    # Used for measuring the time taken for the epochs themselves
+    end = time.time()
+    print("Elapsed time:",end-start)
+
+    ep =[i for i in range(1, args.epochs + 1)]
+
+
+    print("Current quantization method:",qsparselocal.quantization_scheme)
+    print("Learning rate:",learning_rate)
+    print("Gap:",gap)
+    print("Loss:",loss_list)
+    print("Accuracy:",acc_list)
+
+    
 
 
 if __name__ == "__main__":
