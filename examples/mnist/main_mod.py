@@ -11,6 +11,7 @@ from torch.optim.lr_scheduler import StepLR
 import logging
 import bagua.torch_api as bagua
 import time
+import sys
 
 class Net(nn.Module):
     def __init__(self):
@@ -61,6 +62,12 @@ def train(args, model, train_loader, optimizer, epoch):
                     loss.item(),
                 )
             )
+        
+        # DEBUG: Looking for origin of memory issue
+        #if epoch == 3 and batch_idx * len(data) == 6080:
+        #    print("Statistics for CUDA: \n\n")
+        #    print(torch.cuda.memory_stats(device='cuda'))
+
 
 
 def test(model, test_loader):
@@ -96,9 +103,9 @@ def main():
     # Training settings
     parser = argparse.ArgumentParser(description="PyTorch MNIST Example")
     parser.add_argument(
-        "--batch-size",
+        "--batch_size",
         type=int,
-        default=64,
+        default=64, 
         metavar="N",
         help="input batch size for training (default: 64)",
     )
@@ -186,6 +193,12 @@ def main():
     logging.basicConfig(format="%(levelname)s:%(message)s", level=logging.ERROR)
     if bagua.get_rank() == 0:
         logging.getLogger().setLevel(logging.INFO)
+        ############ Save log to file
+        #logger = logging.getLogger()
+        #logger.setLevel(logging.INFO)
+        #file_handler = logging.FileHandler('logs.log')
+        #file_handler.setLevel(logging.DEBUG)
+        #logger.addHandler(file_handler)
 
     train_kwargs = {"batch_size": args.batch_size}
     test_kwargs = {"batch_size": args.test_batch_size}
@@ -251,12 +264,12 @@ def main():
 
     elif args.algorithm == "qsparselocal":
         import qsparselocal
-        learning_rate = args.lr
+        
         #Gap between synchronization rounds
-        gap = 0
+        gap = 3
 
         optimizer = qsparselocal.QSparseLocalOptimizer(
-            model.parameters(), lr=learning_rate, schedule = gap +1
+            model.parameters(), lr=args.lr, schedule = gap +1
         )
         algorithm = qsparselocal.QSparseLocalAlgorithm(optimizer)
 
@@ -295,12 +308,19 @@ def main():
 
         #test(model, test_loader)
 
-        new_loss,new_acc =test(model, test_loader)
+        new_loss,new_acc = test(model, test_loader)
         loss_list.append(new_loss)
         acc_list.append(new_acc/100.0)
-        
+	
+        # 22.5 No real effect on filling CUDA
+        #del new_loss,new_acc
+
         scheduler.step()
         torch.cuda.empty_cache()
+        
+        # Determine CUDA statistics for finding memory issues
+        #print("Statistics for CUDA: \n\n")
+        #print(torch.cuda.memory_stats(device='cuda'))
 
     if args.save_model:
         torch.save(model.state_dict(), "mnist_cnn.pt")
@@ -310,11 +330,13 @@ def main():
     print("Elapsed time:",end-start)
 
     ep =[i for i in range(1, args.epochs + 1)]
+    
+    # Those three values only exist for 
+    if 'qsparselocal' in sys.modules:
+        print("Current quantization method:",qsparselocal.quantization_scheme)
+        print("Gap:",gap)
 
-
-    print("Current quantization method:",qsparselocal.quantization_scheme)
-    print("Learning rate:",learning_rate)
-    print("Gap:",gap)
+    print("Learning rate:", args.lr)
     print("Loss:",loss_list)
     print("Accuracy:",acc_list)
 
