@@ -213,12 +213,9 @@ class QSparseLocalAlgorithmImpl(AlgorithmImpl):
         self.optimizer = q_sparse_local_optimizer
         self.sync = self.optimizer.sync
 
-    # Adjusted according to Fang's suggestion 1 
+    # Adjusted according to Fang's new suggestion 
     def need_reset(self):
-        if xor(self.optimizer.sync , (self.optimizer.step_id -1)%self.optimizer.schedule == 0):
-          return True
-        else:
-          return False
+        return False
 
     def init_tensors(self, bagua_distributed_data_parallel: BaguaDistributedDataParallel):
         parameters = bagua_distributed_data_parallel.bagua_build_params()
@@ -245,8 +242,8 @@ class QSparseLocalAlgorithmImpl(AlgorithmImpl):
 
         tensor_groups.sort(key=lambda x: x._q_sparse_local_idx)
         #################################################
-        del param._q_sparse_local_name, param._q_sparse_local_idx
-        torch.cuda.synchronize()
+        #del param._q_sparse_local_name, param._q_sparse_local_idx
+        #torch.cuda.synchronize()
         return tensor_groups
 
     def tensors_to_buckets(
@@ -310,7 +307,7 @@ class QSparseLocalAlgorithmImpl(AlgorithmImpl):
             ), "bagua backend tensor data_ptr should match _q_sparse_local_grad data_ptr"
             # Only needed for communication
             if self.optimizer.sync:
-                # Adjusted according to Fang's suggestion 2
+                # Adjusted according to Fang's new suggestion
                 parameter.bagua_mark_communication_ready()
                 #print("Ready")
 
