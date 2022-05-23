@@ -187,7 +187,7 @@ class QSparseLocalOptimizer(Optimizer):
         self.step_id += 1
         # Schedule defines the number of rounds per synchronization round
         self.sync = self.step_id % self.schedule == 0        
-        print("\nStep",self.step_id)
+        #print("\nStep",self.step_id)
         
         ##### MEM Problem might appear per Step not per Epoch
         #torch.cuda.empty_cache()
@@ -213,6 +213,7 @@ class QSparseLocalAlgorithmImpl(AlgorithmImpl):
         self.optimizer = q_sparse_local_optimizer
         self.sync = self.optimizer.sync
 
+    # Adjusted according to Fang's suggestion 1 
     def need_reset(self):
         if xor(self.optimizer.sync , (self.optimizer.step_id -1)%self.optimizer.schedule == 0):
           return True
@@ -301,7 +302,7 @@ class QSparseLocalAlgorithmImpl(AlgorithmImpl):
     # Instead of momentum hook, we use a qsl_gradient hook
     def init_backward_hook(self, bagua_distributed_data_parallel: BaguaDistributedDataParallel):
 
-        print("In hook")
+        #print("In hook")
         def hook_qsl_grad(parameter_name, parameter):
             assert (
                     parameter.bagua_backend_tensor().data_ptr()
@@ -309,8 +310,9 @@ class QSparseLocalAlgorithmImpl(AlgorithmImpl):
             ), "bagua backend tensor data_ptr should match _q_sparse_local_grad data_ptr"
             # Only needed for communication
             if self.optimizer.sync:
-              parameter.bagua_mark_communication_ready()
-              #print("Ready")
+                # Adjusted according to Fang's suggestion 2
+                parameter.bagua_mark_communication_ready()
+                #print("Ready")
 
         return hook_qsl_grad
 
