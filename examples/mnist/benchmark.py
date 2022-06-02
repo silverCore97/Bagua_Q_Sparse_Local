@@ -74,7 +74,7 @@ def train(args, model, train_loader, optimizer, epoch):
         timer= e-s
         #time = timeit.timeit(benchmark_step, number=args.num_batches_per_iter)
         #img_sec = args.batch_size * args.num_batches_per_iter / time
-        img_sec = len(train_loader.dataset)/timer
+        img_sec = len(data)/timer
         logging.info(
            "Iter #%d: %.1f img/sec %s" % (batch_idx, img_sec * bagua.get_world_size(),
                                           "GPU")
@@ -94,10 +94,38 @@ def train(args, model, train_loader, optimizer, epoch):
 
 
 
-def test(model, test_loader):
+def test(model, test_loader, train_loader):
     model.eval()
     test_loss = 0
     correct = 0
+
+
+    train_loss = 0
+    train_correct = 0
+    with torch.no_grad():
+        for data, target in train_loader:
+            data, target = data.cuda(), target.cuda()
+            output = model(data)
+            train_loss += F.nll_loss(
+                output, target, reduction="sum"
+            ).item()  # sum up batch loss
+            pred = output.argmax(
+                dim=1, keepdim=True
+            )  # get the index of the max log-probability
+            train_correct += pred.eq(target.view_as(pred)).sum().item()
+
+    train_loss /= len(train_loader.dataset)
+
+    logging.info(
+        "\nTraining set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n".format(
+            train_loss,
+            train_correct,
+            len(train_loader.dataset),
+            100.0 * train_correct / len(train_loader.dataset),
+        )
+    )
+
+    
     with torch.no_grad():
         for data, target in test_loader:
             data, target = data.cuda(), target.cuda()
@@ -120,7 +148,7 @@ def test(model, test_loader):
             100.0 * correct / len(test_loader.dataset),
         )
     )
-    return test_loss,correct
+    return test_loss, correct, train_loss, train_correct
 
 
 def main():
@@ -203,6 +231,14 @@ def main():
         default=False,
         help="fuse optimizer or not",
     )
+
+    parser.add_argument(
+        "--gap",
+        default=3,
+        type=int,
+        help="gap between synchronization rounds",
+    )
+
 
     #args = parser.parse_args() 
     # New line below solves ipykernel_launcher.py: error: unrecognized arguments
@@ -293,11 +329,10 @@ def main():
     #################################################################    
     elif args.algorithm == "qsparselocal":
         import qsparselocal
-        learning_rate = args.lr
         # Set lower learning rate, no convergence for lr = 1
-        Gap=3
+        gap=3
         optimizer = qsparselocal.QSparseLocalOptimizer(
-            model.parameters(), lr=learning_rate, schedule = Gap+1
+            model.parameters(), lr=args.lr, schedule = args.gap+1
         )
         algorithm = qsparselocal.QSparseLocalAlgorithm(optimizer)
     elif args.algorithm == "async":
@@ -323,7 +358,9 @@ def main():
     #------------ Loss, accuracy
     loss_list =[]
     acc_list = []
-
+    train_loss_list =[]
+    train_acc_list = []
+    
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
     
     start = time.time()
@@ -338,9 +375,11 @@ def main():
         if args.algorithm == "async":
             model.bagua_algorithm.abort(model)
 
-        new_loss,new_acc =test(model, test_loader)
+        new_loss,new_acc, new_train_loss, new_train_acc =test(model, test_loader, train_loader)
         loss_list.append(new_loss)
-        acc_list.append(new_acc/100.0)
+        acc_list.append(new_acc*100/len(test_loader))
+        train_loss_list.append(new_train_loss)
+        train_acc_list.append(new_train_acc*100/len(train_loader))
         scheduler.step()
         ####
         torch.cuda.empty_cache()
@@ -381,11 +420,15 @@ def main():
     ep =[i for i in range(1, args.epochs + 1)]
 
 
-    print("Current quantization method:",qsparselocal.quantization_scheme)
-    print("Learning rate:",learning_rate)
-    print("Loss:",loss_list)
-    print("Accuracy:",acc_list)
-    
+    # Those three values only exist for 
+    if args.algorithm == 'qsparselocal':
+        print("Current quantization method:",qsparselocal.quantization_scheme)
+        print("Gap:",gap)
+    print("Learning rate:",args.lr)
+    print("Train Loss:",train_loss_list)
+    print("Train Accuracy:",train_acc_list)   
+    print("Test Loss:",loss_list)
+    print("Test Accuracy:",acc_list)
      
     """
     plt.figure(1)

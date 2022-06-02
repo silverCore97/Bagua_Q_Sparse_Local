@@ -70,10 +70,38 @@ def train(args, model, train_loader, optimizer, epoch):
 
 
 
-def test(model, test_loader):
+def test(model, test_loader, train_loader):
     model.eval()
     test_loss = 0
     correct = 0
+
+
+    train_loss = 0
+    train_correct = 0
+    with torch.no_grad():
+        for data, target in train_loader:
+            data, target = data.cuda(), target.cuda()
+            output = model(data)
+            train_loss += F.nll_loss(
+                output, target, reduction="sum"
+            ).item()  # sum up batch loss
+            pred = output.argmax(
+                dim=1, keepdim=True
+            )  # get the index of the max log-probability
+            train_correct += pred.eq(target.view_as(pred)).sum().item()
+
+    train_loss /= len(train_loader.dataset)
+
+    logging.info(
+        "\nTraining set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n".format(
+            train_loss,
+            train_correct,
+            len(train_loader.dataset),
+            100.0 * train_correct / len(train_loader.dataset),
+        )
+    )
+
+    
     with torch.no_grad():
         for data, target in test_loader:
             data, target = data.cuda(), target.cuda()
@@ -96,7 +124,7 @@ def test(model, test_loader):
             100.0 * correct / len(test_loader.dataset),
         )
     )
-    return test_loss,correct
+    return test_loss, correct, train_loss, train_correct
 
 
 def main():
@@ -295,6 +323,9 @@ def main():
 
     loss_list =[]
     acc_list = []
+    train_loss_list =[]
+    train_acc_list = []
+    
     start = time.time()
     
     for epoch in range(1, args.epochs + 1):
@@ -306,21 +337,15 @@ def main():
         if args.algorithm == "async":
             model.bagua_algorithm.abort(model)
 
-        #test(model, test_loader)
 
-        new_loss,new_acc = test(model, test_loader)
+        new_loss,new_acc, new_train_loss, new_train_acc =test(model, test_loader, train_loader)
         loss_list.append(new_loss)
-        acc_list.append(new_acc/100.0)
-	
-        # 22.5 No real effect on filling CUDA
-        #del new_loss,new_acc
-
+        acc_list.append(new_acc*100/len(test_loader))
+        train_loss_list.append(new_train_loss)
+        train_acc_list.append(new_train_acc*100/len(train_loader))
         scheduler.step()
         torch.cuda.empty_cache()
-        
-        # Determine CUDA statistics for finding memory issues
-        #print("Statistics for CUDA: \n\n")
-        #print(torch.cuda.memory_stats(device='cuda'))
+
 
     if args.save_model:
         torch.save(model.state_dict(), "mnist_cnn.pt")
@@ -332,13 +357,15 @@ def main():
     ep =[i for i in range(1, args.epochs + 1)]
     
     # Those three values only exist for 
-    if 'qsparselocal' in sys.modules:
+    if args.algorithm == 'qsparselocal':
         print("Current quantization method:",qsparselocal.quantization_scheme)
         print("Gap:",gap)
 
     print("Learning rate:", args.lr)
-    print("Loss:",loss_list)
-    print("Accuracy:",acc_list)
+    print("Train Loss:",train_loss_list)
+    print("Train Accuracy:",train_acc_list)   
+    print("Test Loss:",loss_list)
+    print("Test Accuracy:",acc_list)
 
     
 
