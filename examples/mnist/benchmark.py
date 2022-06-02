@@ -231,7 +231,6 @@ def main():
         default=False,
         help="fuse optimizer or not",
     )
-
     parser.add_argument(
         "--gap",
         default=3,
@@ -330,7 +329,6 @@ def main():
     elif args.algorithm == "qsparselocal":
         import qsparselocal
         # Set lower learning rate, no convergence for lr = 1
-        gap=3
         optimizer = qsparselocal.QSparseLocalOptimizer(
             model.parameters(), lr=args.lr, schedule = args.gap+1
         )

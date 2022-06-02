@@ -202,6 +202,13 @@ def main():
         default=False,
         help="fuse optimizer or not",
     )
+    parser.add_argument(
+        "--gap",
+        default=3,
+        type=int,
+        help="gap between synchronization rounds",
+    )
+
 
     #args = parser.parse_args()
     args, unknown = parser.parse_known_args()
@@ -292,12 +299,9 @@ def main():
 
     elif args.algorithm == "qsparselocal":
         import qsparselocal
-        
-        #Gap between synchronization rounds
-        gap = 3
 
         optimizer = qsparselocal.QSparseLocalOptimizer(
-            model.parameters(), lr=args.lr, schedule = gap +1
+            model.parameters(), lr=args.lr, schedule = args.gap +1
         )
         algorithm = qsparselocal.QSparseLocalAlgorithm(optimizer)
 
