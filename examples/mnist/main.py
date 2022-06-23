@@ -11,6 +11,7 @@ from torch.optim.lr_scheduler import StepLR
 import logging
 import bagua.torch_api as bagua
 import time
+import sys
 
 class Net(nn.Module):
     def __init__(self):
@@ -61,12 +62,41 @@ def train(args, model, train_loader, optimizer, epoch):
                     loss.item(),
                 )
             )
+        
 
 
-def test(model, test_loader):
+def test(model, test_loader, train_loader):
     model.eval()
     test_loss = 0
     correct = 0
+
+
+    train_loss = 0
+    train_correct = 0
+    with torch.no_grad():
+        for data, target in train_loader:
+            data, target = data.cuda(), target.cuda()
+            output = model(data)
+            train_loss += F.nll_loss(
+                output, target, reduction="sum"
+            ).item()  # sum up batch loss
+            pred = output.argmax(
+                dim=1, keepdim=True
+            )  # get the index of the max log-probability
+            train_correct += pred.eq(target.view_as(pred)).sum().item()
+
+    train_loss /= len(train_loader.dataset)
+
+    logging.info(
+        "\nTraining set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n".format(
+            train_loss,
+            train_correct,
+            len(train_loader.dataset),
+            100.0 * train_correct / len(train_loader.dataset),
+        )
+    )
+
+    
     with torch.no_grad():
         for data, target in test_loader:
             data, target = data.cuda(), target.cuda()
@@ -89,16 +119,16 @@ def test(model, test_loader):
             100.0 * correct / len(test_loader.dataset),
         )
     )
-    return test_loss,correct
+    return test_loss, correct, train_loss, train_correct
 
 
 def main():
     # Training settings
     parser = argparse.ArgumentParser(description="PyTorch MNIST Example")
     parser.add_argument(
-        "--batch-size",
+        "--batch_size",
         type=int,
-        default=64,
+        default=64, 
         metavar="N",
         help="input batch size for training (default: 64)",
     )
@@ -168,7 +198,58 @@ def main():
         help="fuse optimizer or not",
     )
 
-    #args = parser.parse_args()
+    # Quantization scheme used
+    parser.add_argument(
+        "--quantization_scheme",
+        type=str,
+        default="sign",
+        help="qsgd, sign",
+    )
+
+    # Gap is one less than the synchronization period
+    parser.add_argument(
+        "--gap",
+        default=3,
+        type=int,
+        help="gap between synchronization rounds",
+    )
+
+
+    parser.add_argument(
+        "--use_memory",
+        action="store_true",
+        default=False,
+        help="True, False",
+    ) 
+    parser.add_argument(
+        "--quantization_levels",
+        type=int,
+        default=256,
+        help="1 to 256",
+    )
+
+    # The following arguments are set to True by default
+    parser.add_argument(
+        "--sparsify",
+        action="store_true",
+        default=True,
+        help="True, False",
+    )
+    
+    parser.add_argument(
+        "--top_k_sparsification",
+        action="store_true",
+        default=True,
+        help="True, False",
+    ) 
+    parser.add_argument(
+        "--use_normalization",
+        action="store_true",
+        default=True,
+        help="True, False",
+    ) 
+    
+
     args, unknown = parser.parse_known_args()
     if args.set_deterministic:
         print("set_deterministic: True")
@@ -212,6 +293,12 @@ def main():
     train_sampler = torch.utils.data.distributed.DistributedSampler(
         dataset1, num_replicas=bagua.get_world_size(), rank=bagua.get_rank()
     )
+
+    dataset3 = datasets.MNIST("../data", train=True, transform=transform)
+    train_loader_total = torch.utils.data.DataLoader(dataset3, **train_kwargs)
+
+    
+
     train_kwargs.update(
         {
             "sampler": train_sampler,
@@ -249,14 +336,20 @@ def main():
         )
         algorithm = q_adam.QAdamAlgorithm(optimizer)
 
+    # Qsparse-local-SGD
     elif args.algorithm == "qsparselocal":
         import qsparselocal
-        learning_rate = args.lr
-        #Gap between synchronization rounds
-        gap = 1
 
         optimizer = qsparselocal.QSparseLocalOptimizer(
-            model.parameters(), lr=learning_rate, schedule = gap +1
+            model.parameters(),
+            lr = args.lr,
+            schedule = args.gap +1,
+            quantization_scheme = args.quantization_scheme,
+            sparsify = args.sparsify,
+            use_memory = args.use_memory,
+            quantization_levels = args.quantization_levels,
+            top_k_sparsification = args.top_k_sparsification,
+            use_normalization = args.use_normalization
         )
         algorithm = qsparselocal.QSparseLocalAlgorithm(optimizer)
 
@@ -282,6 +375,9 @@ def main():
 
     loss_list =[]
     acc_list = []
+    train_loss_list =[]
+    train_acc_list = []
+    
     start = time.time()
     
     for epoch in range(1, args.epochs + 1):
@@ -293,31 +389,40 @@ def main():
         if args.algorithm == "async":
             model.bagua_algorithm.abort(model)
 
-        #test(model, test_loader)
 
-        new_loss,new_acc =test(model, test_loader)
+        new_loss,new_acc, new_train_loss, new_train_acc =test(model, test_loader, train_loader_total)
         loss_list.append(new_loss)
-        acc_list.append(new_acc/100.0)
-        
+        acc_list.append(new_acc*100/len(test_loader.dataset))
+        train_loss_list.append(new_train_loss)
+        train_acc_list.append(new_train_acc*100/len(train_loader_total.dataset))
         scheduler.step()
+        torch.cuda.empty_cache()
+
 
     if args.save_model:
         torch.save(model.state_dict(), "mnist_cnn.pt")
 
-    # Used for measuring the time taken for the epochs themselves
+
     end = time.time()
     print("Elapsed time:",end-start)
+   
+    if args.algorithm == 'qsparselocal':
+        print("Current quantization method:", args.quantization_scheme)
+        print("Gap:", args.gap)
+        print("Synchronization period of", args.gap+1)
+        print("Sparsify:", args.sparsify)
+        print("Error compensation used:", args.use_memory)
+        print("Quantization levels:", args.quantization_levels)
+        print("Top_k sparsification", args.top_k_sparsification)
+        print("Use normalization(QSGD):", args.use_normalization)
+        
 
-    ep =[i for i in range(1, args.epochs + 1)]
+    print("Learning rate:", args.lr)
+    print("Train Loss:",train_loss_list)
+    print("Train Accuracy:",train_acc_list)   
+    print("Test Loss:",loss_list)
+    print("Test Accuracy:",acc_list)
 
-
-    print("Current quantization method:",qsparselocal.quantization_scheme)
-    print("Learning rate:",learning_rate)
-    print("Gap:",gap)
-    print("Loss:",loss_list)
-    print("Accuracy:",acc_list)
-
-    
 
 
 if __name__ == "__main__":

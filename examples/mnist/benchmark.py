@@ -10,14 +10,16 @@ from torchvision import datasets, transforms
 from torch.optim.lr_scheduler import StepLR
 import logging
 import bagua.torch_api as bagua
+#import bagua_core 
 import time
-import sys
+
+#bagua_core.install_deps()
 
 #Benchmark
-#import timeit
+import timeit
 import torch.backends.cudnn as cudnn
 import torch.utils.data.distributed
-#from torchvision import models
+from torchvision import models
 
 
 # Model for Neural Network
@@ -93,12 +95,10 @@ def train(args, model, train_loader, optimizer, epoch):
     return img_secs
 
 
-
 def test(model, test_loader, train_loader):
     model.eval()
     test_loss = 0
     correct = 0
-
 
     train_loss = 0
     train_correct = 0
@@ -125,7 +125,7 @@ def test(model, test_loader, train_loader):
         )
     )
 
-    
+
     with torch.no_grad():
         for data, target in test_loader:
             data, target = data.cuda(), target.cuda()
@@ -148,8 +148,7 @@ def test(model, test_loader, train_loader):
             100.0 * correct / len(test_loader.dataset),
         )
     )
-    return test_loss, correct, train_loss, train_correct
-
+    return test_loss,correct, train_loss, train_correct
 
 def main():
     # Training settings
@@ -164,7 +163,7 @@ def main():
     parser.add_argument(
         "--test-batch-size",
         type=int,
-        default=1000,
+        default=64,
         metavar="N",
         help="input batch size for testing (default: 1000)",
     )
@@ -173,14 +172,14 @@ def main():
     parser.add_argument(
         "--epochs",
         type=int,
-        default=14,
+        default=1,
         metavar="N",
         help="number of epochs to train (default: 14)",
     )
     parser.add_argument(
         "--lr",
         type=float,
-        default=0.1,
+        default=0.001,
         metavar="LR",
         help="learning rate (default: 1.0)",
     )
@@ -209,8 +208,8 @@ def main():
         "--algorithm",
         type=str,
         default="qsparselocal",
-        help="gradient_allreduce, bytegrad, decentralized, low_precision_decentralized, qadam, async",
-        #Add new algorithm for testing------------------
+        help="qsparselocal, gradient_allreduce, bytegrad, decentralized, low_precision_decentralized, qadam, async",
+
     )
 
     parser.add_argument(
@@ -231,6 +230,17 @@ def main():
         default=False,
         help="fuse optimizer or not",
     )
+
+
+    # Quantization scheme used
+    parser.add_argument(
+        "--quantization_scheme",
+        type=str,
+        default="sign",
+        help="qsgd, sign",
+    )
+
+    # Gap is one less than the synchronization period
     parser.add_argument(
         "--gap",
         default=3,
@@ -239,6 +249,40 @@ def main():
     )
 
 
+    parser.add_argument(
+        "--use_memory",
+        action="store_true",
+        default=False,
+        help="True, False",
+    ) 
+    parser.add_argument(
+        "--quantization_levels",
+        type=int,
+        default=256,
+        help="1 to 256",
+    )
+
+    # The following arguments are set to True by default
+    parser.add_argument(
+        "--sparsify",
+        action="store_true",
+        default=True,
+        help="True, False",
+    )
+    
+    parser.add_argument(
+        "--top_k_sparsification",
+        action="store_true",
+        default=True,
+        help="True, False",
+    ) 
+    parser.add_argument(
+        "--use_normalization",
+        action="store_true",
+        default=True,
+        help="True, False",
+    ) 
+ 
     #args = parser.parse_args() 
     # New line below solves ipykernel_launcher.py: error: unrecognized arguments
     args, unknown = parser.parse_known_args()
@@ -257,6 +301,7 @@ def main():
     bagua.init_process_group()
 
 
+
     logging.basicConfig(format="%(levelname)s:%(message)s", level=logging.ERROR)
     if bagua.get_rank() == 0:
         logging.getLogger().setLevel(logging.INFO)
@@ -266,11 +311,17 @@ def main():
     cuda_kwargs = {"num_workers": 1, "pin_memory": True, "shuffle": True}
     train_kwargs.update(cuda_kwargs)
     test_kwargs.update(cuda_kwargs)
-
+    """
     transform = transforms.Compose(
         [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
     )
-
+    """
+    # Transform for VGG16 network with resized images
+    transform = transforms.Compose(
+        [transforms.Resize(size=224), transforms.Grayscale(3)
+        ,transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
+    )
+    
     if bagua.get_local_rank() == 0:
         dataset1 = datasets.MNIST(
             "../data", train=True, download=True, transform=transform
@@ -286,6 +337,11 @@ def main():
     train_sampler = torch.utils.data.distributed.DistributedSampler(
         dataset1, num_replicas=bagua.get_world_size(), rank=bagua.get_rank()
     )
+    
+    dataset3 = datasets.MNIST("../data", train=True, transform=transform)
+    train_loader_total = torch.utils.data.DataLoader(dataset3, **train_kwargs)
+
+    
     train_kwargs.update(
         {
             "sampler": train_sampler,
@@ -297,8 +353,22 @@ def main():
     train_loader = torch.utils.data.DataLoader(dataset1, **train_kwargs)
     test_loader = torch.utils.data.DataLoader(dataset2, **test_kwargs)
 
-    # Throw the instantiation of the network onto the cuda dvice
-    model = Net().cuda()
+    ################
+    # Instantiate VGG16 model
+    vgg16 = models.vgg16()
+    """
+    #Freeze Layers - Maybe
+    for param in vgg16.parameters():
+          param.requires_grad = False    
+    """
+    vgg16.classifier[6] = nn.Sequential(
+                                        nn.Linear(4096, 128),
+                                        nn.ReLU(),
+                                        nn.Dropout(0.5),
+                                        nn.Linear(128, 10),
+                                        nn.LogSoftmax(dim=1)
+                                        )
+    model = vgg16.cuda()
     optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
 
 
@@ -325,14 +395,24 @@ def main():
             model.parameters(), lr=args.lr, warmup_steps=100
         )
         algorithm = q_adam.QAdamAlgorithm(optimizer)
-    #################################################################    
+
+    # Qsparse-local-SGD
     elif args.algorithm == "qsparselocal":
         import qsparselocal
-        # Set lower learning rate, no convergence for lr = 1
+
         optimizer = qsparselocal.QSparseLocalOptimizer(
-            model.parameters(), lr=args.lr, schedule = args.gap+1
+            model.parameters(),
+            lr = args.lr,
+            schedule = args.gap +1,
+            quantization_scheme = args.quantization_scheme,
+            sparsify = args.sparsify,
+            use_memory = args.use_memory,
+            quantization_levels = args.quantization_levels,
+            top_k_sparsification = args.top_k_sparsification,
+            use_normalization = args.use_normalization
         )
         algorithm = qsparselocal.QSparseLocalAlgorithm(optimizer)
+
     elif args.algorithm == "async":
         from bagua.torch_api.algorithms import async_model_average
 
@@ -353,31 +433,33 @@ def main():
     if args.fuse_optimizer:
         optimizer = bagua.contrib.fuse_optimizer(optimizer)
 
+
     #------------ Loss, accuracy
     loss_list =[]
     acc_list = []
     train_loss_list =[]
     train_acc_list = []
     
+    img_secs_total =[]
+
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
     
     start = time.time()
-    img_secs_total=[]
     for epoch in range(1, args.epochs + 1):
         if args.algorithm == "async":
             model.bagua_algorithm.resume(model)
 
-        #Benchmark
         img_epoch = train(args, model, train_loader, optimizer, epoch)
         img_secs_total.append(img_epoch)
+
         if args.algorithm == "async":
             model.bagua_algorithm.abort(model)
 
-        new_loss,new_acc, new_train_loss, new_train_acc =test(model, test_loader, train_loader)
+        new_loss,new_acc, new_train_loss, new_train_acc =test(model, test_loader, train_loader_total)
         loss_list.append(new_loss)
-        acc_list.append(new_acc*100/len(test_loader))
+        acc_list.append(new_acc*100/len(test_loader.dataset))
         train_loss_list.append(new_train_loss)
-        train_acc_list.append(new_train_acc*100/len(train_loader))
+        train_acc_list.append(new_train_acc*100/len(train_loader_total.dataset))
         scheduler.step()
         ####
         torch.cuda.empty_cache()
@@ -385,12 +467,10 @@ def main():
     if args.save_model:
         torch.save(model.state_dict(), "mnist_cnn.pt")
 
-    # Benchmark
-    if args.algorithm == "async":
-      model.bagua_algorithm.abort(model)
-
     # Used for measuring the time taken for the epochs themselves
     end = time.time()
+    print("Elapsed time:",end-start)
+
 
     # Results Benchmark
     i=1
@@ -409,24 +489,22 @@ def main():
                 bagua.get_world_size() * img_sec_conf,
             )
         )
-
-
-    print("Elapsed time:",end-start)
-
-    import matplotlib.pyplot as plt
-
-    ep =[i for i in range(1, args.epochs + 1)]
-
-
-    # Those three values only exist for 
+      
+    
+        # These values only exist for qsparselocal
     if args.algorithm == 'qsparselocal':
         print("Current quantization method:",qsparselocal.quantization_scheme)
-        print("Gap:",gap)
-    print("Learning rate:",args.lr)
+        print("Gap:",args.gap)
+        print("Synchronization period:",args.gap+1)
+
+    print("Learning rate:", args.lr)
     print("Train Loss:",train_loss_list)
     print("Train Accuracy:",train_acc_list)   
     print("Test Loss:",loss_list)
     print("Test Accuracy:",acc_list)
+
+
+    
      
     """
     plt.figure(1)
